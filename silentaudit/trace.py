@@ -34,6 +34,50 @@ def _norm(path) -> str:
         return ""
 
 
+_PKG_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _site() -> str:
+    """返回触发这次系统调用的用户代码位置，形如 ``migrate.py:42``。
+
+    调用链是 被测代码 → _hook → _on → _dispatch → 这里，中间还会夹着
+    importlib / contextlib 之类的框架帧。与其数层数，不如一路往上走、
+    跳过所有属于把本包的帧 —— 版本升级、加一层包装都不会让这里失准。
+    """
+    try:
+        frame = sys._getframe(1)
+    except Exception:
+        return ""
+    seen = 0
+    while frame is not None and seen < 60:
+        try:
+            name = frame.f_code.co_filename
+        except Exception:
+            return ""
+        if name and name.startswith("<"):
+            frame = frame.f_back
+            seen += 1
+            continue
+        try:
+            full = os.path.abspath(name)
+        except Exception:
+            full = name
+        if not full.startswith(_PKG_DIR):
+            return f"{os.path.basename(full)}:{frame.f_lineno}"
+        frame = frame.f_back
+        seen += 1
+    return ""
+
+
+def _remember(s, path: str, site: str) -> None:
+    if not site:
+        return
+    bucket = s.sites.get(path)
+    if bucket is None:
+        bucket = s.sites[path] = Counter()
+    bucket[site] += 1
+
+
 @dataclass
 class TraceSummary:
     available: bool = True
@@ -47,6 +91,12 @@ class TraceSummary:
     outside: list = field(default_factory=list)
     overflow: bool = False
     events: int = 0
+    # 写入来自哪一行：{写过的路径: Counter({"script.py:42": 1, ...})}
+    # 只对写事件记录 —— 读事件动辄上万次，逐个走栈会把被测脚本拖慢。
+    sites: dict = field(default_factory=dict)
+    # 读事件的位置：只记每个路径的第一次。读取次数可能是几万次，
+    # 每条都走栈会把被测脚本拖慢；而"这行读的"只需知道一次。
+    read_sites: dict = field(default_factory=dict)
 
     # ---- 聚合视图，给 judge 用 ----
     @property
@@ -60,6 +110,24 @@ class TraceSummary:
     @property
     def write_count(self) -> int:
         return sum(self.writes.values())
+
+    def site_of(self, path: str) -> str:
+        """某个文件是被哪一行写的；多个位置时取最常出现的那个。"""
+        bucket = self.sites.get(path)
+        if not bucket:
+            return ""
+        site, n = bucket.most_common(1)[0]
+        return site if n == 1 else f"{site}（共 {n} 次）"
+
+    def sites_for(self, paths) -> list[str]:
+        """一批路径的写入位置，去重、保持输入顺序。"""
+        out, seen = [], set()
+        for p in paths:
+            t = self.site_of(p)
+            if t and t not in seen:
+                seen.add(t)
+                out.append(t)
+        return out
 
     def inside(self, roots: list[str]) -> None:
         """把不在 roots 里的路径单独拎出来提醒（很常见的 bug：写到了别处）。"""
@@ -112,14 +180,18 @@ class Trace:
                 writing = bool(flags & _FILE_WRITE_FLAGS)
             if writing:
                 s.writes[key] += 1
+                _remember(s, key, _site())
             else:
                 s.reads[key] += 1
+                if key not in s.read_sites:
+                    s.read_sites[key] = _site()
             return
 
         if event == "os.rename":
             src, dst = _norm(args[0]), _norm(args[1])
             s.renames.append((src, dst))
             s.writes[dst] += 1
+            _remember(s, dst, _site())
             return
 
         if event in ("os.remove", "os.unlink"):

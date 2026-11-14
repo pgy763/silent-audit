@@ -492,6 +492,107 @@ print(f"迁移完成，处理 {n} 行")
 
 
 # ---------------------------------------------------------------- 子进程
+def test_sites():
+    NL = chr(10)
+    print("\n[写入来自哪一行]")
+
+    with Temp() as t:
+        src = t.write("multi.py", NL.join([
+            'open("a.txt", "w").write("1")',
+            'open("b.txt", "w").write("2")',
+            'print("写入完成")', '']))
+        r = runner.run(src, watch=[str(t.path)], cwd=str(t.path), quiet=True)
+        sites = r.trace.sites
+        a_key = [k for k in sites if k.endswith("a.txt")]
+        b_key = [k for k in sites if k.endswith("b.txt")]
+        check("两个文件都记到了位置", len(a_key) == 1 and len(b_key) == 1)
+        check("位置精确到行",
+              sites[a_key[0]].most_common(1)[0][0] == "multi.py:1",
+              f"-> {dict(sites[a_key[0]])}")
+        check("第二个文件的行号不同",
+              sites[b_key[0]].most_common(1)[0][0] == "multi.py:2",
+              f"-> {dict(sites[b_key[0]])}")
+
+    # 同一个文件被写了两次，位置计数应该是 2
+    with Temp() as t:
+        src = t.write("twice.py", NL.join([
+            'for i in range(2):',
+            '    open("out.txt", "a").write(str(i))',
+            'print("追加完成")', '']))
+        r = runner.run(src, watch=[str(t.path)], cwd=str(t.path), quiet=True)
+        key = [k for k in r.trace.sites if k.endswith("out.txt")]
+        n = r.trace.sites[key[0]].most_common(1)[0][1] if key else 0
+        check("重复写入被计数", n == 2, f"-> {n}")
+
+    # 证据行里要带行号
+    with Temp() as t:
+        t.write("r.html", "<html>" + "x" * 3000 + "</html>")
+        src = t.write("empty.py", NL.join([
+            'with open("r.html", "w", encoding="utf-8") as f:',
+            '    f.write("")',
+            'print("报告已生成")', '']))
+        r = runner.run(src, watch=[str(t.path)], cwd=str(t.path), quiet=True)
+        hit = [f for f in r.verdict.findings if "空壳" in f.title]
+        check("空壳判据存在", bool(hit), f"-> {[f.title for f in r.verdict.findings]}")
+        joined = " ".join(hit[0].evidence) if hit else ""
+        check("空壳证据带源码行号", "empty.py:1" in joined, f"-> {joined}")
+
+    print("\n[被静默跳过的输入]")
+    from silentaudit.judge import skipped_inputs
+
+    with Temp() as t:
+        # 7 个输入，其中 1 个是坏 JSON 被 continue 掉
+        for i in range(1, 8):
+            t.write(f"data/f{i}.json", '{"a": 1}' if i != 6 else "not json")
+        src = t.write("conv.py", NL.join([
+            'import json, glob, os',
+            'here = os.path.dirname(os.path.abspath(__file__))',
+            'for p in sorted(glob.glob(os.path.join(here, "data", "*.json"))):',
+            '    try:',
+            '        rec = json.load(open(p, encoding="utf-8"))',
+            '    except Exception:',
+            '        continue',
+            '    with open(p.replace(".json", ".csv"), "w") as f:',
+            '        f.write("id,value")',
+            'print(f"处理完成：共 {7} 个文件")', '']))
+        r = runner.run(src, watch=[str(t.path)], cwd=str(t.path), quiet=True)
+        skipped, _ = skipped_inputs(r.trace, r.diff, str(t.path))
+        check("认出被跳过的那个输入", len(skipped) == 1, f"-> {skipped}")
+        check("指出的是坏文件", "f6" in skipped[0] if skipped else False,
+              f"-> {skipped}")
+        check("指出读取它的行号", "conv.py:5" in skipped[0] if skipped else False,
+              f"-> {skipped}")
+        hit = [f for f in r.verdict.findings if "没有对应的产出" in f.title]
+        check("判据里出现了", bool(hit),
+              f"-> {[f.title for f in r.verdict.findings]}")
+        check("半成功要扣分", r.verdict.score < 10.0, f"-> {r.verdict.score}")
+
+    # 全部成功时必须一声不吭
+    with Temp() as t:
+        for i in range(1, 5):
+            t.write(f"data/g{i}.json", '{"a": 1}')
+        src = t.write("conv.py", NL.join([
+            'import json, glob, os',
+            'here = os.path.dirname(os.path.abspath(__file__))',
+            'for p in sorted(glob.glob(os.path.join(here, "data", "*.json"))):',
+            '    rec = json.load(open(p, encoding="utf-8"))',
+            '    with open(p.replace(".json", ".csv"), "w") as f:',
+            '        f.write("id,value")',
+            'print("处理完成：共 4 个文件")', '']))
+        r = runner.run(src, watch=[str(t.path)], cwd=str(t.path), quiet=True)
+        skipped, _ = skipped_inputs(r.trace, r.diff, str(t.path))
+        check("全部成功时不报跳过", skipped == [], f"-> {skipped}")
+        check("全部成功时不扣分", r.verdict.score >= 9.0, f"-> {r.verdict.score}")
+
+    # 输入太少时不启用这条判据（2 个文件少 1 个，很可能是设计如此）
+    before = snapshot.Diff([], [], ["D:\\x\\a.csv"], [], 0, 1)
+    tr = trace.TraceSummary()
+    tr.reads["D:\\x\\a.json"] = 1
+    tr.reads["D:\\x\\b.json"] = 1
+    skipped, _ = skipped_inputs(tr, before, "D:\\x")
+    check("输入少于 3 个时不启用", skipped == [], f"-> {skipped}")
+
+
 def test_procs():
     print("\n[子进程观测]")
     from silentaudit import procwatch
@@ -600,6 +701,7 @@ def main() -> int:
     test_trace()
     test_expect()
     test_shrink()
+    test_sites()
     test_procs()
     test_replay()
     test_e2e()

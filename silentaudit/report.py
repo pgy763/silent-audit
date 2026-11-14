@@ -262,30 +262,40 @@ def _file_section(lines: list[str], res, base: str) -> None:
         except Exception:
             return p
 
+    sites = getattr(res.trace, "sites", None) or {}
+
+    def tail(p: str) -> str:
+        """这一行是哪个源码位置写出来的。多写一处时只标第一个，避免行太长。"""
+        bucket = sites.get(p)
+        if not bucket:
+            return ""
+        name, n = bucket.most_common(1)[0]
+        return f"  {C.w(name, C.GREY)}" + (f" {C.w(f'×{n}', C.GREY)}" if n > 1 else "")
+
     d = res.diff
     if d.changed:
         lines.append(f"  {C.w('内容真的变了', C.GREEN + C.BOLD)} {C.w(f'({len(d.changed)})', C.GREY)}")
         for p in d.changed[:12]:
-            lines.append(f"    {C.w('+', C.GREEN)} {rel(p)}")
+            lines.append(f"    {C.w('+', C.GREEN)} {rel(p)}{tail(p)}")
         if len(d.changed) > 12:
             lines.append(f"    {C.w(f'… 还有 {len(d.changed) - 12} 个', C.GREY)}")
         lines.append("")
     if d.created:
         lines.append(f"  {C.w('新建', C.CYAN + C.BOLD)} {C.w(f'({len(d.created)})', C.GREY)}")
         for p in d.created[:12]:
-            lines.append(f"    {C.w('+', C.CYAN)} {rel(p)}")
+            lines.append(f"    {C.w('+', C.CYAN)} {rel(p)}{tail(p)}")
         if len(d.created) > 12:
             lines.append(f"    {C.w(f'… 还有 {len(d.created) - 12} 个', C.GREY)}")
         lines.append("")
     if d.deleted:
         lines.append(f"  {C.w('删除', C.RED + C.BOLD)} {C.w(f'({len(d.deleted)})', C.GREY)}")
         for p in d.deleted[:12]:
-            lines.append(f"    {C.w('-', C.RED)} {rel(p)}")
+            lines.append(f"    {C.w('-', C.RED)} {rel(p)}")  # 删掉的文件没有写入位置
         if len(d.deleted) > 12:
             lines.append(f"    {C.w(f'… 还有 {len(d.deleted) - 12} 个', C.GREY)}")
         lines.append("")
     if d.touched and not d.changed:
         lines.append(f"  {C.w('写过了但没变化', C.YELLOW + C.BOLD)} {C.w(f'({len(d.touched)})', C.GREY)}")
         for p in d.touched[:12]:
-            lines.append(f"    {C.w('=', C.YELLOW)} {rel(p)}")
+            lines.append(f"    {C.w('=', C.YELLOW)} {rel(p)}{tail(p)}")
         lines.append("")

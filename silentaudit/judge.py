@@ -166,6 +166,98 @@ def _real_failures(procs: list) -> list:
     return out
 
 
+_INPUT_EXT = (".csv", ".json", ".txt", ".xml", ".yaml", ".yml", ".md",
+              ".tsv", ".log", ".html", ".htm", ".ini", ".toml")
+
+
+def skipped_inputs(trace, diff, base: str) -> tuple[list[str], list[str]]:
+    """找出"读了、但没有对应产出"的输入文件。
+
+    只有在能建立名字对应关系时才敢下结论：``f3.json`` 读过了，写出的却是
+    ``f1.csv f2.csv f4.csv…`` —— f3 缺了。判据刻意保守：
+
+    * 只统计落在 ``--watch`` 里的输入（不把 json/scanner.pyc 这类依赖算进来）；
+    * 输入至少 3 个才启用（2 个文件里少 1 个，更可能是设计如此）；
+    * 必须能按文件名主干匹配上，否则这套对应关系本身不成立。
+
+    返回 ``(确认被跳过的输入, 无法判断的输入)``。
+    """
+    reads = getattr(trace, "reads", None) or {}
+    read_sites = getattr(trace, "read_sites", None) or {}
+    ins = [p for p in reads
+           if p.lower().endswith(_INPUT_EXT)
+           and not any(x in p for x in ("site-packages", "__pycache__"))]
+    if len(ins) < 3:
+        return [], []
+
+    # 产物的名字可能是 ``r1.json.tsv`` 或 ``r1.min.csv``，所以只取第一段做
+    # 对应关系 —— 完整 stem（``r1.json``）反而不匹配输入 ``r1.json``。
+    outs = list(diff.changed) + list(diff.created)
+    out_stems = {os.path.basename(p).split(".")[0].lower() for p in outs}
+    if not out_stems:
+        return [], []
+
+    in_stems = {}
+    for p in ins:
+        in_stems.setdefault(os.path.basename(p).split(".")[0].lower(), p)
+
+    # 名字能对上，说明这个脚本确实是"一个输入一个输出"的形态
+    matched = [k for k in in_stems if k in out_stems]
+    if len(matched) < 2 or len(matched) < len(in_stems) * 0.5:
+        return [], []
+
+    definite, unclear = [], []
+    for stem, path in sorted(in_stems.items()):
+        if stem in out_stems:
+            continue
+        site = read_sites.get(path, "")
+        note = f"{_short(path, base)}" + (f"  ←  {site}" if site else "")
+        # 这个输入读过了，同名的输出却没出现 —— 而且本脚本其他文件都能对上
+        definite.append(note)
+    return definite, unclear
+
+
+def _zero_change_evidence(trace) -> list[str]:
+    """零变更时的证据：写了多少次、文件几时被打开、最近的一次在哪一行。"""
+    lines = [f"运行期间 open(...,'w') 次数：{trace.write_count}",
+             "内容真正变化的文件：0",
+             f"读取的文件：{len(trace.reads)}"]
+    sites = getattr(trace, "sites", None) or {}
+    if sites:
+        pairs = []
+        for path, bucket in sites.items():
+            for name, n in bucket.items():
+                pairs.append((n, name, path))
+        pairs.sort(reverse=True)
+        seen = set()
+        for n, name, path in pairs:
+            if name in seen:
+                continue
+            seen.add(name)
+            lines.append(f"写入位置：{name}" + ("" if n == 1 else f"（{n} 次）"))
+            if len(seen) >= 3:
+                break
+    return lines
+
+
+def _where(trace, paths, base: str, limit: int = 6) -> list[str]:
+    """把一批路径渲染成证据行，能定位到源码行的话就带上。
+
+    「3 个文件被写成了空壳」不如「3 个文件被写成了空壳，都来自第 42 行」有用 ——
+    看到行号才知道该改哪里。
+    """
+    sites = getattr(trace, "sites", None) or {}
+    out = []
+    for p in list(paths)[:limit]:
+        site = ""
+        bucket = sites.get(p)
+        if bucket:
+            name, n = bucket.most_common(1)[0]
+            site = f"  ←  {name}" if n == 1 else f"  ←  {name}（{n} 次）"
+        out.append(f"{_short(p, base)}{site}")
+    return out
+
+
 def judge(exit_code: int, stdout: str, stderr: str, trace: TraceSummary,
           diff: Diff, roots: list[str], base: str,
           snapshot_taken: bool = True,
@@ -191,9 +283,7 @@ def judge(exit_code: int, stdout: str, stderr: str, trace: TraceSummary,
             "退出码 0，报告成功，但磁盘上没有任何文件发生变化",
             "它跑完了、没报错、打印了成功信息，但所有文件的 md5 与运行前一致。"
             "这是最典型的静默失败：逻辑根本没进循环，或者写回的内容和原来一样。",
-            [f"运行期间 open(...,'w') 次数：{trace.write_count}",
-             f"内容真正变化的文件：0",
-             f"读取的文件：{len(trace.reads)}"],
+            _zero_change_evidence(trace),
             penalty=7.0,
         ))
 
@@ -238,7 +328,7 @@ def judge(exit_code: int, stdout: str, stderr: str, trace: TraceSummary,
             "脚本确实执行了写入，只是写回去的东西和原来一样。"
             "常见原因：要设的值本来就是当前值；替换词根本没出现在文本里；"
             "或者格式化输出恰好还原了原始排版。",
-            [_short(p, base) for p in diff.touched[:8]],
+            _where(trace, diff.touched, base, 8),
             penalty=2.0,
         ))
 
@@ -277,7 +367,7 @@ def judge(exit_code: int, stdout: str, stderr: str, trace: TraceSummary,
             "最常见的原因是 open(..., \"w\") 之后写入那一行被跳过了：文件在 open "
             "的那一刻就被清空，异常被吞掉，脚本照样打印「已生成」。这类损坏比"
             "「没写」更危险 —— 下游读到的是一个存在但为空的文件。",
-            [_short(p, base) for p in diff.emptied[:6]],
+            _where(trace, diff.emptied, base),
             penalty=6.0,
         ))
     elif diff.shrunk:
@@ -286,9 +376,23 @@ def judge(exit_code: int, stdout: str, stderr: str, trace: TraceSummary,
             f"{len(diff.shrunk)} 个文件体积掉到原来的 1/100 以下",
             "内容确实变了，但少得反常。压缩、格式转换这类脚本本来就会变小，"
             "所以这里只提醒；如果脚本号称\"就地更新\"，那它是把内容写丢了。",
-            [_short(p, base) for p in diff.shrunk[:6]],
+            _where(trace, diff.shrunk, base),
             penalty=2.0,
         ))
+
+    # 3d) 读进来的输入，有一部分没有对应的产出 —— 而且它没提
+    if exit_code == 0 and says_done and snapshot_taken:
+        skipped, _ = skipped_inputs(trace, diff, base)
+        if skipped:
+            findings.append(Finding(
+                "fail" if len(skipped) >= 3 else "warn",
+                f"{len(skipped)} 个输入文件读过了，但没有对应的产出",
+                "同一次运行里别的文件都能一一对上，唯独这几个只有输入没有输出。"
+                "最常见的写法是 except/continue 把失败吞掉，然后照常打印"
+                "「处理完成」。既然它没提，你就不会知道少了哪几个。",
+                skipped[:6],
+                penalty=5.0 if len(skipped) >= 3 else 3.0,
+            ))
 
     # 4) 读了却一行没写
     if (exit_code == 0 and snapshot_taken and trace.read_count >= 50

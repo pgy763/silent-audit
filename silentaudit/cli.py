@@ -98,6 +98,14 @@ def _demo() -> int:
     (base / "notes.txt").write_text("hello\n" * 200, encoding="utf-8")
     # 样本 6 要用到：一份已经存在、有内容的报告。没有它，
     # "写空壳"就退化成"新建了一个空文件"，判据本来就不该报。
+    # 样本 7 要用到：7 份 JSON，其中第 6 份是坏的
+    (base / "records").mkdir(exist_ok=True)
+    for i in range(1, 8):
+        body = '{"id": %d, "value": %d}\n' % (i, i * 10)
+        if i == 6:
+            body = "这不是 JSON\n"
+        (base / "records" / ("r%d.json" % i)).write_text(body, encoding="utf-8")
+
     (base / "report.html").write_text(
         "<html><body>\n" + "<p>旧内容</p>\n" * 600 + "</body></html>\n",
         encoding="utf-8")
@@ -183,19 +191,40 @@ with open("report.html", "w", encoding="utf-8") as f:
 print("报告已生成：report.html")
 """, encoding="utf-8")
 
+    # 7：7 份输入，坏掉的那份被 continue 掉，仍然打印「处理完成」
+    (base / "7_silent_skip.py").write_text("""# 7 份输入，坏了 1 份。except 把它跳过，然后照常报告成功。
+# 这就是 agent 最常见的"半成功"：每条记录都进过循环，只是有一批走了 continue。
+import glob
+import json
+import os
+
+here = os.path.dirname(os.path.abspath(__file__))
+files = sorted(glob.glob(os.path.join(here, "records", "*.json")))
+for p in files:
+    try:
+        rec = json.load(open(p, encoding="utf-8"))
+    except Exception:
+        continue
+    out = os.path.join(here, "records", os.path.basename(p) + ".tsv")
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(f"{rec['id']}\\t{rec['value']}\\n")
+print(f"处理完成：共 {len(files)} 个文件")
+""", encoding="utf-8")
+
     report_mod.setup(False)
-    print(f"\n  在 {base} 生成了六个样本，它们的共同点是："
+    print(f"\n  在 {base} 生成了七个样本，它们的共同点是："
           f"退出码 0、打印成功、但结果不是你想要的。\n")
 
     rc = 0
     for name in ("1_field_case.py", "2_noop_write.py", "3_wrong_newline.py",
-                 "4_wrong_target.py", "5_failed_subproc.py", "6_emptied.py"):
+                 "4_wrong_target.py", "5_failed_subproc.py", "6_emptied.py",
+                 "7_silent_skip.py"):
         script = base / name
         res = runner.run(script, watch=[str(base)], quiet=True)
         print(report_mod.C.w(f"━━ {name} ", report_mod.C.BOLD) +
               report_mod.C.w("━" * 50, report_mod.C.GREY))
         print(report_mod.render(res, base=str(base)))
-    print(f"  六个样本都在 {base}，可以直接打开看。"
+    print(f"  七个样本都在 {base}，可以直接打开看。"
           f"删掉它：rm -rf {DEMO_DIR_NAME}\n")
     return rc
 
