@@ -17,6 +17,7 @@ from pathlib import Path
 
 from . import judge as judge_mod
 from . import snapshot
+from .procwatch import ProcWatch
 from .trace import Trace, capture
 
 
@@ -30,6 +31,7 @@ class RunResult:
     diff: object
     verdict: object
     snapshot_note: str
+    procs: list = None
 
 
 def _user_roots(script: Path, watch: list[str] | None) -> list[str]:
@@ -82,12 +84,13 @@ def run(script: Path, args: list[str] | None = None,
                    str(script), "exec")
     glb = {"__name__": "__main__", "__file__": str(script),
            "__builtins__": __builtins__, "__doc__": None}
+    watch = ProcWatch()
 
     try:
         os.chdir(work_dir)
         sys.argv = [str(script)] + list(args or [])
         sys.stdout, sys.stderr = out_buf, err_buf
-        with capture(trace):
+        with capture(trace), watch:
             exec(code, glb)
     except SystemExit as e:
         exit_code = 0 if e.code is None else (e.code if isinstance(e.code, int) else 1)
@@ -104,6 +107,7 @@ def run(script: Path, args: list[str] | None = None,
             pass
 
     trace.summary.inside(trace.roots)
+    procs = list(watch.recs)
 
     after = snapshot.Snapshot({})
     if take_snapshot:
@@ -113,7 +117,8 @@ def run(script: Path, args: list[str] | None = None,
     verdict = judge_mod.judge(exit_code, out_buf.getvalue(), err_buf.getvalue(),
                               trace.summary, diff, roots, work_dir,
                               snapshot_taken=take_snapshot,
-                              allow_new=allow_new)
+                              allow_new=allow_new,
+                              procs=procs)
 
     # 只有在"报告不可信"时才去源码里找线索，避免满屏噪音
     try:
@@ -135,4 +140,4 @@ def run(script: Path, args: list[str] | None = None,
         pass
 
     return RunResult(exit_code, out_buf.getvalue(), err_buf.getvalue(), duration,
-                     trace.summary, diff, verdict, note)
+                     trace.summary, diff, verdict, note, procs)

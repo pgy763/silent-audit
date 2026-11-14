@@ -58,6 +58,31 @@ class Temp:
         shutil.rmtree(self.path, ignore_errors=True)
 
 
+# ---------------------------------------------------------------- 换行
+def test_wrap():
+    print("\n[换行]")
+    from silentaudit.report import _wrap
+
+    # 英文单词不能被劈开：check=True 曾断成 check=T / rue
+    lines = _wrap("除非写了 check=True。于是「转换失败」变成了「完成」。", 30)
+    check("英文单词没被劈开", all("check=T" != l.strip() for l in lines), f"-> {lines}")
+    check("check=True 完整出现在某一行",
+          any("check=True" in l for l in lines), f"-> {lines}")
+
+    # 中文之间可以断，且每行宽度不超限
+    long = "这是一段很长的中文" * 6
+    ls = _wrap(long, 20)
+    widths = [sum(2 if ord(c) > 0x2E80 else 1 for c in l) for l in ls]
+    check("中文按宽度断行", all(w <= 20 for w in widths), f"-> {widths}")
+    check("中文没丢字", "".join(ls) == long, f"-> {len(''.join(ls))} vs {len(long)}")
+
+    # 超长路径（单段就超宽）要硬切而不是溢出
+    path = "D:/" + "x" * 60 + "/f.txt"
+    pls = _wrap(path, 20)
+    check("超长路径被硬切", all(len(l) <= 20 for l in pls), f"-> {[len(l) for l in pls]}")
+    check("超长路径没丢字符", "".join(pls) == path, f"-> {''.join(pls)}")
+
+
 # ---------------------------------------------------------------- 声称解析
 def test_claims():
     print("\n[声称解析]")
@@ -291,13 +316,115 @@ print(f"迁移完成，处理 {n} 行")
               any("退出码 1" in f.title for f in res.verdict.findings))
 
 
+# ---------------------------------------------------------------- 子进程
+def test_procs():
+    print("\n[子进程观测]")
+    from silentaudit import procwatch
+
+    with procwatch.ProcWatch() as w:
+        import subprocess
+        import sys as _s
+        subprocess.run([_s.executable, "-c", "pass"])
+        subprocess.run([_s.executable, "-c", "import sys; sys.exit(3)"])
+
+    check("抓到两次调用", len(w.recs) == 2, f"-> {[r.cmd for r in w.recs]}")
+    check("退出码被记录", [r.code for r in w.recs] == [0, 3],
+          f"-> {[r.code for r in w.recs]}")
+    check("失败的那个被认出来", len(w.failed()) == 1,
+          f"-> {len(w.failed())}")
+    check("recs 按时间排序",
+          all(w.recs[i].start <= w.recs[i + 1].start for i in range(len(w.recs) - 1)))
+    check("stamp 是相对时刻", w.recs[0].stamp().startswith("+"),
+          f"-> {w.recs[0].stamp()}")
+    check("退出后方法已恢复", subprocess.Popen.wait.__qualname__.startswith("Popen"),
+          f"-> {subprocess.Popen.wait.__qualname__}")
+
+    # 命令不存在：起不来本身也是证据，而且不能把异常吞掉
+    with procwatch.ProcWatch() as w2:
+        try:
+            subprocess.run(["definitely-not-a-real-cmd-xyz"])
+        except (OSError, FileNotFoundError):
+            pass
+    check("起不来的命令被记成失败",
+          len(w2.recs) == 1 and w2.recs[0].code == -1 and bool(w2.recs[0].error),
+          f"-> {[(r.code, r.error[:40]) for r in w2.recs]}")
+
+    print("\n[子进程：不该冤枉 git diff]")
+    from silentaudit import snapshot as _snap
+    diff = _snap.Diff([], [], [], [], [])
+    ts = trace.TraceSummary()
+
+    class FakeProc:
+        def __init__(self, argv, code):
+            self.argv, self.code, self.cmd = argv, code, " ".join(argv)
+            self.start = self.end = 1.0
+            self.finished = True
+            self.duration = 0.1
+
+        def stamp(self):
+            return "+0.10s"
+
+        @property
+        def short(self):
+            return self.cmd
+
+        @property
+        def failed(self):
+            return self.code != 0
+
+    # 这个用例只测子进程判据，所以关掉"没拍快照就别谈磁盘"的无关告警
+    quiet = [FakeProc(["git", "diff", "--quiet"], 1)]
+    v = judge.judge(0, "完成", "", ts, diff, [str(ROOT)], str(ROOT),
+                    snapshot_taken=False, procs=quiet)
+    check("git diff --quiet 退出 1 不算失败", v.score >= 9,
+          f"-> {v.score} / {[f.title for f in v.findings]}")
+
+    loud = [FakeProc(["git", "push"], 1)]
+    v2 = judge.judge(0, "推送完成", "", ts, diff, [str(ROOT)], str(ROOT),
+                     snapshot_taken=False, procs=loud)
+    check("git push 退出 1 仍算失败", v2.score < 6,
+          f"-> {v2.score} / {[f.title for f in v2.findings]}")
+
+    print("\n[端到端：子进程失败但报告成功]")
+    with Temp() as t:
+        bad = t.write("bad_sub.py", '''\
+import subprocess
+import sys
+subprocess.run([sys.executable, "-c", "import sys; sys.exit(2)"])
+print("转换完成")
+''')
+        res = runner.run(bad, watch=[str(t.path)], quiet=True)
+        check("子进程失败被扣分", res.verdict.score < 6,
+              f"-> {res.verdict.score} / {[f.title for f in res.verdict.findings]}")
+        check("证据里有退出码",
+              any("退出码 2" in str(f.evidence) for f in res.verdict.findings),
+              f"-> {[f.evidence for f in res.verdict.findings]}")
+
+    print("\n[端到端：子进程成功的不该扣分]")
+    with Temp() as t:
+        good = t.write("good_sub.py", '''\
+import subprocess
+import sys
+subprocess.run([sys.executable, "-c", "print('hi')"])
+with open("out.txt", "w", encoding="utf-8") as f:
+    f.write("done")
+print("转换完成")
+''')
+        res = runner.run(good, watch=[str(t.path)], quiet=True,
+                         allow_new=["*.txt"])
+        check("子进程全成功时得高分", res.verdict.score >= 9,
+              f"-> {res.verdict.score} / {[f.title for f in res.verdict.findings]}")
+
+
 def main() -> int:
     print("silent-audit 自测")
+    test_wrap()
     test_claims()
     test_hints()
     test_snapshot()
     test_trace()
     test_expect()
+    test_procs()
     test_e2e()
     total = PASS + FAIL
     print(f"\n{total} 项：{PASS} passed, {FAIL} failed")

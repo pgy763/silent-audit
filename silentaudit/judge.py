@@ -133,10 +133,44 @@ def _short(p: str, base: str) -> str:
         return p
 
 
+def _real_failures(procs: list) -> list:
+    """从子进程记录里挑出"真的失败了"的，排除退出码 1 有特殊含义的命令。
+
+    ``git diff --quiet`` / ``grep`` / ``find`` / ``diff`` / ``cmp`` 用 1 表示
+    "有差异 / 没匹配"，这不算失败。判错的后果是冤枉一个正常脚本，
+    比漏判更伤 —— 用户一旦见过一次误报，就会关掉整个工具。
+    """
+    tolerated = ("git", "grep", "egrep", "fgrep", "find", "findstr", "diff",
+                 "cmp", "fc", "where", "which", "test", "[")
+    out = []
+    for p in procs:
+        if not p.failed:
+            continue
+        head = ""
+        if p.argv:
+            head = os.path.basename(str(p.argv[0]).replace("\\", "/")).lower()
+            head = head[:-4] if head.endswith(".exe") else head
+        # git 的子命令要看第二个词：git diff --quiet 用 1 表示"有差异"，
+        # 而 git push 用 1 表示"真的失败了"
+        if head in tolerated:
+            sub = ""
+            if head == "git" and len(p.argv) > 1:
+                sub = str(p.argv[1]).lower()
+            if head == "git":
+                if sub in ("diff", "grep", "status", "rev-parse", "merge-base",
+                           "diff-index", "diff-tree", "ls-files", "show-ref"):
+                    continue
+            elif p.code == 1:
+                continue
+        out.append(p)
+    return out
+
+
 def judge(exit_code: int, stdout: str, stderr: str, trace: TraceSummary,
           diff: Diff, roots: list[str], base: str,
           snapshot_taken: bool = True,
-          allow_new: list[str] | None = None) -> Verdict:
+          allow_new: list[str] | None = None,
+          procs: list | None = None) -> Verdict:
     findings: list[Finding] = []
     score = 10.0
 
@@ -292,13 +326,80 @@ def judge(exit_code: int, stdout: str, stderr: str, trace: TraceSummary,
             penalty=0.0,
         ))
 
-    # 8) 子进程：本工具看不见子进程内部
-    if trace.subprocs:
+    # 8) 子进程：退出码非零，但脚本照样报告成功
+    #    这是"退出码 0 的静默失败"最大的一个变种：主进程一切正常，
+    #    干活的那个子进程失败了，而 subprocess.run 忘了 check=True。
+    procs = list(procs or [])
+    if procs:
+        bad = _real_failures(procs)
+        if bad:
+            lines = [f"{p.stamp()}  {p.short}   → 退出码 {p.code}"
+                     for p in bad[:5]]
+            if says_done and exit_code == 0:
+                findings.append(Finding(
+                    "fail",
+                    f"{len(bad)} 个子进程以非零码退出，脚本仍然报告成功",
+                    "主进程没抛异常，因为 subprocess.run 不会因为子进程失败而抛 —— "
+                    "除非写了 check=True。于是「转换失败」变成了「✓ 完成」，"
+                    "而产物根本没生成。",
+                    lines,
+                    penalty=5.0,
+                ))
+            elif exit_code != 0:
+                findings.append(Finding(
+                    "info",
+                    f"{len(bad)} 个子进程以非零码退出",
+                    "主脚本自己也报了失败，所以这是一次诚实的失败，而不是静默失败。",
+                    lines,
+                    penalty=0.0,
+                ))
+            else:
+                findings.append(Finding(
+                    "warn",
+                    f"{len(bad)} 个子进程以非零码退出，脚本没有任何表示",
+                    "脚本没说要干什么，所以不能确定这是问题。但如果它接下来"
+                    "还要用这些子进程的产物，那些产物可能是不完整的。",
+                    lines,
+                    penalty=1.5,
+                ))
+        unfinished = [p for p in procs if not p.finished]
+        if unfinished:
+            findings.append(Finding(
+                "warn",
+                f"{len(unfinished)} 个子进程在脚本结束时还没退出",
+                "脚本没等它结束就走了。它可能还在后台写文件，此时拍下的"
+                "快照是不完整的 —— 产物有可能在报告生成之后才落盘。",
+                [f"{p.stamp()}  {p.short}" for p in unfinished[:4]],
+                penalty=1.0,
+            ))
+        if not bad and not unfinished:
+            tolerated = [p for p in procs if p.failed]
+            if tolerated:
+                findings.append(Finding(
+                    "info",
+                    f"调用了 {len(procs)} 次子进程，其中 {len(tolerated)} 次退出码非零",
+                    "这几个命令的退出码 1 有别的含义（git diff 表示\"有差异\"、"
+                    "grep/find 表示\"没匹配\"），不算失败，所以没有扣分。",
+                    [f"{p.stamp()}  {p.short}  → {p.code}" for p in tolerated[:4]],
+                    penalty=0.0,
+                ))
+            else:
+                findings.append(Finding(
+                    "info",
+                    f"调用了 {len(procs)} 次子进程，全部正常退出",
+                    "退出码都拿到了。注意子进程**内部**的读写仍然看不见，"
+                    "只有当前 Python 进程受审计钩子覆盖。",
+                    [f"{p.stamp()}  {p.short}  ({p.duration:.2f}s)"
+                     for p in procs[:4]],
+                    penalty=0.0,
+                ))
+    elif trace.subprocs:
+        # 有审计事件但没抓到最后状态：多半走的是 os.system / spawn
         findings.append(Finding(
             "info",
-            f"调用了 {len(trace.subprocs)} 次子进程，它们内部的行为不在本次观测范围内",
-            "审计钩子只覆盖当前 Python 进程。子进程的读写只能靠文件快照兜底，"
-            "如果子进程改了本项目目录之外的文件，这里看不到。",
+            f"调用了 {len(trace.subprocs)} 次子进程，但拿不到它们的退出码",
+            "这些调用没走 subprocess.Popen（可能是 os.system / os.spawn*），"
+            "所以无法判断它们成功与否。它们的读写只能靠文件快照兜底。",
             [c[:100] for c in trace.subprocs[:5]],
             penalty=0.4,
         ))

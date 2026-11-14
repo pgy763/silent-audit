@@ -128,19 +128,31 @@ with open("data(1).csv", "w", encoding="utf-8") as f:
 print("已保存到 data(1).csv，共", len(rows), "行")
 ''', encoding="utf-8")
 
+    # 5：子进程失败了，但忘了 check=True
+    (base / "5_failed_subproc.py").write_text('''# 调用的子进程失败了，但忘了 check=True，于是照样报告成功。
+import subprocess
+import sys
+
+with open("slides.txt", "w", encoding="utf-8") as f:
+    f.write("")
+
+subprocess.call([sys.executable, "-c", "import sys; sys.exit(3)"])
+print("转换完成：1 个文件 → slides.txt")
+''', encoding="utf-8")
+
     report_mod.setup(False)
-    print(f"\n  在 {base} 生成了四个样本，它们的共同点是："
+    print(f"\n  在 {base} 生成了五个样本，它们的共同点是："
           f"退出码 0、打印成功、但结果不是你想要的。\n")
 
     rc = 0
     for name in ("1_field_case.py", "2_noop_write.py", "3_wrong_newline.py",
-                 "4_wrong_target.py"):
+                 "4_wrong_target.py", "5_failed_subproc.py"):
         script = base / name
         res = runner.run(script, watch=[str(base)], quiet=True)
         print(report_mod.C.w(f"━━ {name} ", report_mod.C.BOLD) +
               report_mod.C.w("━" * 50, report_mod.C.GREY))
         print(report_mod.render(res, base=str(base)))
-    print(f"  四个样本都在 {base}，可以直接打开看。"
+    print(f"  五个样本都在 {base}，可以直接打开看。"
           f"删掉它：rm -rf {DEMO_DIR_NAME}\n")
     return rc
 

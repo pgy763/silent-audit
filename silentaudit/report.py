@@ -110,6 +110,11 @@ def render(res, *, verbose: bool = False, base: str | None = None) -> str:
         ("物证", evidence),
         ("退出码", str(v.exit_code)),
     ]
+    procs = list(getattr(res, "procs", None) or [])
+    if procs:
+        n_bad = sum(1 for p in procs if p.code is not None and p.code != 0)
+        tail = f"，{n_bad} 次非零" if n_bad else ""
+        rows.insert(3, ("子进程", f"{len(procs)} 次{tail}"))
     for k, val in rows:
         lines.append(f"  {C.w(k.ljust(6), C.GREY)}  {val}")
     lines.append("")
@@ -140,24 +145,56 @@ def render(res, *, verbose: bool = False, base: str | None = None) -> str:
     return "\n".join(lines)
 
 
+def _chunks(s: str) -> list[str]:
+    """切成不可再分的片段：中日韩字符各自成段，拉丁单词/数字/标点连成一段。
+
+    这样换行时只会落在中文与中文之间、中文与英文之间，不会把
+    `check=True` 这种英文单词劈成 `check=T` + `rue`。
+    """
+    out: list[str] = []
+    buf = ""
+    for ch in s:
+        wide = ord(ch) > 0x2E80
+        if wide or ch.isspace():
+            if buf:
+                out.append(buf)
+                buf = ""
+            out.append(ch)
+        else:
+            buf += ch
+    if buf:
+        out.append(buf)
+    return out
+
+
 def _wrap(s: str, width: int) -> list[str]:
-    import textwrap
     out: list[str] = []
     for para in s.split("\n"):
         if not para.strip():
             out.append("")
             continue
-        # 中文按 2 个宽度算
         cur, cur_w = "", 0
-        for ch in para:
-            w = 2 if ord(ch) > 0x2E80 else 1
-            if cur_w + w > width:
-                out.append(cur)
+        for piece in _chunks(para):
+            w = sum(2 if ord(c) > 0x2E80 else 1 for c in piece)
+            if cur_w + w > width and cur:
+                out.append(cur.rstrip())
                 cur, cur_w = "", 0
-            cur += ch
+                if piece.isspace():
+                    continue
+            # 单段就超过整行宽（超长路径/URL）时硬切
+            if w > width:
+                for c in piece:
+                    cw = 2 if ord(c) > 0x2E80 else 1
+                    if cur_w + cw > width:
+                        out.append(cur)
+                        cur, cur_w = "", 0
+                    cur += c
+                    cur_w += cw
+                continue
+            cur += piece
             cur_w += w
-        if cur:
-            out.append(cur)
+        if cur.strip():
+            out.append(cur.rstrip())
     return out or [""]
 
 
