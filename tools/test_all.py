@@ -13,7 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from silentaudit import judge, runner, snapshot, trace  # noqa: E402
+from silentaudit import expect, judge, runner, snapshot, trace  # noqa: E402
 from silentaudit.hints import collect_keys, hints  # noqa: E402
 
 PASS = FAIL = 0
@@ -160,6 +160,75 @@ def test_trace():
               f"-> {tr2.summary.renames}")
 
 
+# ---------------------------------------------------------------- 写错地方
+def test_expect():
+    print("\n[写错地方]")
+    with Temp() as t:
+        (t.path / "data.csv").write_text("a\n", encoding="utf-8")
+
+        dup = str(t.path / "data(1).csv")
+        (t.path / "data(1).csv").write_text("a\n", encoding="utf-8")
+        got = expect.classify([dup], "已保存到 data(1).csv")
+        check("认出 (1) 副本", got[0].kind == "dup", f"-> {got[0].kind}")
+        check("指出本该写谁",
+              got[0].shadow.endswith("data.csv"), f"-> {got[0].shadow}")
+
+        copy = str(t.path / "data copy.csv")
+        (t.path / "data copy.csv").write_text("a\n", encoding="utf-8")
+        check("认出 copy 副本",
+              expect.classify([copy], "")[0].kind == "dup")
+
+        # 只有副本名、没有本尊：不该怀疑
+        lone = str(t.path / "report-1.csv")
+        (t.path / "report-1.csv").write_text("a\n", encoding="utf-8")
+        check("没有本尊不算副本",
+              expect.classify([lone], "")[0].kind == "stray")
+
+        # 正常新建的报告：提到过 / 白名单
+        rep = str(t.path / "report.html")
+        (t.path / "report.html").write_text("x\n", encoding="utf-8")
+        check("提到过的新文件不报警",
+              expect.classify([rep], "报告写好了：report.html")[0].kind
+              == "mentioned")
+        check("白名单生效",
+              expect.classify([rep], "", allow=["*.html"])[0].kind == "allowed")
+        check("白名单也认目录形式",
+              expect.classify([rep], "", allow=[str(t.path / "*")])[0].kind
+              == "allowed")
+
+    print("\n[端到端：写错地方会被扣分]")
+    with Temp() as t:
+        (t.path / "data.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+        bad = t.write("wrong_target.py", '''\\
+rows = open("data.csv", encoding="utf-8").read().splitlines()
+with open("data(1).csv", "w", encoding="utf-8") as f:
+    for line in rows:
+        f.write(line.upper() + "\\n")
+print("已保存到 data(1).csv")
+''')
+        res = runner.run(bad, watch=[str(t.path)], quiet=True)
+        check("写错地方被扣分", res.verdict.score < 5,
+              f"-> {res.verdict.score}")
+        check("给出了正确证据",
+              any("data.csv" in str(f.evidence) for f in res.verdict.findings),
+              f"-> {[f.evidence for f in res.verdict.findings]}")
+
+    print("\n[端到端：白名单能放过正常产出]")
+    with Temp() as t:
+        (t.path / "data.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+        ok = t.write("make_report.py", '''\\
+rows = open("data.csv", encoding="utf-8").read().splitlines()
+with open("report.html", "w", encoding="utf-8") as f:
+    f.write("<h1>%d</h1>" % len(rows))
+print("报告生成：report.html")
+''')
+        res = runner.run(ok, watch=[str(t.path)], quiet=True,
+                         allow_new=["*.html"])
+        check("白名单里的新文件不扣分", res.verdict.score >= 9,
+              f"-> {res.verdict.score} / "
+              f"{[f.title for f in res.verdict.findings]}")
+
+
 # ---------------------------------------------------------------- 端到端
 def test_e2e():
     print("\n[端到端：应该被抓到的]")
@@ -228,6 +297,7 @@ def main() -> int:
     test_hints()
     test_snapshot()
     test_trace()
+    test_expect()
     test_e2e()
     total = PASS + FAIL
     print(f"\n{total} 项：{PASS} passed, {FAIL} failed")

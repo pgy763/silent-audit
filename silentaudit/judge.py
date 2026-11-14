@@ -135,7 +135,8 @@ def _short(p: str, base: str) -> str:
 
 def judge(exit_code: int, stdout: str, stderr: str, trace: TraceSummary,
           diff: Diff, roots: list[str], base: str,
-          snapshot_taken: bool = True) -> Verdict:
+          snapshot_taken: bool = True,
+          allow_new: list[str] | None = None) -> Verdict:
     findings: list[Finding] = []
     score = 10.0
 
@@ -206,6 +207,33 @@ def judge(exit_code: int, stdout: str, stderr: str, trace: TraceSummary,
             [_short(p, base) for p in diff.touched[:8]],
             penalty=2.0,
         ))
+
+    # 3b) 写出来了，但写成了另一个文件 —— "本该覆盖、结果另存"
+    if diff.created:
+        from .expect import classify
+
+        made = classify(diff.created, stdout + "\n" + stderr, allow=allow_new)
+        dups = [c for c in made if c.kind == "dup"]
+        if dups:
+            findings.append(Finding(
+                "fail",
+                f"{len(dups)} 个新建文件看起来是某个已有文件的副本，而不是覆盖它",
+                "文件名带 (1) / copy / -1 这类后缀，同目录下还留着原名那份。"
+                "脚本会报告\"已保存\"，你的下游脚本却还在读那个没被更新的旧文件。",
+                [f"{_short(c.path, base)}  ← 本应写入 "
+                 f"{_short(c.shadow, base)}" for c in dups[:6]],
+                penalty=6.5,
+            ))
+        stray = [c for c in made if c.kind == "stray"]
+        if stray and not dups:
+            findings.append(Finding(
+                "info",
+                f"新建了 {len(stray)} 个文件，输出里一次都没提到",
+                "生成报告的脚本天生会新建文件，所以这里不扣分。但如果这几个不是"
+                "预期产物，说明路径拼错了 —— 脚本照样会成功退出。",
+                [_short(c.path, base) for c in stray[:6]],
+                penalty=0.0,
+            ))
 
     # 4) 读了却一行没写
     if (exit_code == 0 and snapshot_taken and trace.read_count >= 50

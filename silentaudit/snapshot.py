@@ -15,9 +15,11 @@ from dataclasses import dataclass
 
 _SKIP_DIRS = {
     ".git", ".hg", ".svn", "__pycache__", "node_modules", ".venv", "venv",
-    ".mypy_cache", ".pytest_cache", ".ruff_cache", "out", ".tox", "dist",
-    "build", ".next", ".turbo", ".frames", "site-packages",
+    ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox",
+    ".next", ".turbo", ".frames", "site-packages",
 }
+# 注意：**不跳过 out / dist / build**。它们恰恰是脚本最常写的地方，
+# 跳过就等于对"构建产物有没有真的更新"视而不见。
 _MAX_FILES = 30_000
 _MAX_BYTES = 64 * 1024 * 1024
 

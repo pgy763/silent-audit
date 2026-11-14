@@ -47,10 +47,13 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--quiet", "-q", action="store_true", help="少打点进度")
     r.add_argument("--no-color", action="store_true", help="不要颜色")
     r.add_argument("--verbose", "-v", action="store_true", help="列出所有文件明细")
+    r.add_argument("--allow-new", action="append", metavar="GLOB",
+                   help="允许新建的文件（可重复，支持 * 通配）。"
+                        "用来避免把正常生成的报告误判成\"写错地方\"")
     r.add_argument("--fail-under", type=float, metavar="N",
                    help="可信度低于 N 就以非 0 退出（给 CI 用）")
 
-    s = sub.add_parser("demo", help="跑内置的三个失败样本，看看它到底抓什么")
+    s = sub.add_parser("demo", help="跑内置的四个失败样本，看看它到底抓什么")
     s.add_argument("--no-color", action="store_true")
     return p
 
@@ -59,7 +62,7 @@ DEMO_DIR_NAME = "_silent_audit_demo"
 
 
 def _demo() -> int:
-    """造三个真会静默失败的脚本，逐个审计。"""
+    """造四个真会静默失败的脚本，逐个审计。"""
     base = Path.cwd() / DEMO_DIR_NAME
     base.mkdir(exist_ok=True)
 
@@ -106,18 +109,31 @@ open(p, "w", encoding="utf-8").write("\\n".join(cleaned) + "\\n")
 print(f"清洗完成，共处理 {len(cleaned)} 行")
 ''', encoding="utf-8")
 
+    # 4：写是写了，但写成了另一个文件
+    (base / "data.csv").write_text(
+        "id,value\n" + "".join(f"{i},{i * 2}\n" for i in range(50)),
+        encoding="utf-8")
+    (base / "4_wrong_target.py").write_text('''"""路径拼成了副本名：本该覆盖 data.csv，结果另存成 data(1).csv。"""
+rows = open("data.csv", encoding="utf-8").read().splitlines()
+with open("data(1).csv", "w", encoding="utf-8") as f:
+    for line in rows:
+        f.write(line.replace(",", "\\t") + "\\n")
+print("已保存到 data(1).csv，共", len(rows), "行")
+''', encoding="utf-8")
+
     report_mod.setup(False)
-    print(f"\n  在 {base} 生成了三个样本，它们的共同点是："
-          f"退出码 0、打印成功、但世界没变。\n")
+    print(f"\n  在 {base} 生成了四个样本，它们的共同点是："
+          f"退出码 0、打印成功、但结果不是你想要的。\n")
 
     rc = 0
-    for name in ("1_field_case.py", "2_noop_write.py", "3_wrong_newline.py"):
+    for name in ("1_field_case.py", "2_noop_write.py", "3_wrong_newline.py",
+                 "4_wrong_target.py"):
         script = base / name
         res = runner.run(script, watch=[str(base)], quiet=True)
         print(report_mod.C.w(f"━━ {name} ", report_mod.C.BOLD) +
               report_mod.C.w("━" * 50, report_mod.C.GREY))
         print(report_mod.render(res, base=str(base)))
-    print(f"  三个样本都在 {base}，可以直接打开看。"
+    print(f"  四个样本都在 {base}，可以直接打开看。"
           f"删掉它：rm -rf {DEMO_DIR_NAME}\n")
     return rc
 
@@ -150,7 +166,7 @@ def main(argv: list[str] | None = None) -> int:
     report_mod.setup(ns.no_color)
     res = runner.run(Path(ns.script), args=forwarded, watch=ns.watch,
                      cwd=ns.cwd, take_snapshot=not ns.no_snapshot,
-                     quiet=ns.quiet)
+                     quiet=ns.quiet, allow_new=ns.allow_new)
     print(report_mod.render(res, verbose=ns.verbose,
                             base=os.path.abspath(ns.cwd or
                                                  str(Path(ns.script).resolve().parent))))
@@ -185,6 +201,10 @@ def main(argv: list[str] | None = None) -> int:
                 {"level": f.level, "title": f.title, "detail": f.detail,
                  "evidence": f.evidence}
                 for f in res.verdict.findings
+            ],
+            "hints": [
+                {"line": h.line, "code": h.code, "reason": h.reason}
+                for h in res.verdict.hints
             ],
             "stdout": res.stdout[-8000:],
             "stderr": res.stderr[-8000:],
