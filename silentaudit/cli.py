@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -62,9 +63,15 @@ DEMO_DIR_NAME = "_silent_audit_demo"
 
 
 def _demo() -> int:
-    """造四个真会静默失败的脚本，逐个审计。"""
+    """造四个真会静默失败的脚本，逐个审计。
+
+    每次运行都先把样本目录整个重建 —— 否则上一轮产物还在，脚本第二次
+    "新建" data(1).csv 就变成了"覆盖同名文件"，第四个样本会失效。
+    """
     base = Path.cwd() / DEMO_DIR_NAME
-    base.mkdir(exist_ok=True)
+    if base.exists():
+        shutil.rmtree(base, ignore_errors=True)
+    base.mkdir(parents=True, exist_ok=True)
 
     (base / "rows.csv").write_text(
         "id,URL\n" + "".join(f"{i},http://old.example.com/{i}\n" for i in range(1000)),
