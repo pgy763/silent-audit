@@ -96,6 +96,11 @@ def _demo() -> int:
     (base / "conf.json").write_text(
         '{\n    "timeout": 30,\n    "retries": 3\n}\n', encoding="utf-8")
     (base / "notes.txt").write_text("hello\n" * 200, encoding="utf-8")
+    # 样本 6 要用到：一份已经存在、有内容的报告。没有它，
+    # "写空壳"就退化成"新建了一个空文件"，判据本来就不该报。
+    (base / "report.html").write_text(
+        "<html><body>\n" + "<p>旧内容</p>\n" * 600 + "</body></html>\n",
+        encoding="utf-8")
 
     (base / "1_field_case.py").write_text('''\
 """字段名大小写错了：1000 行全部静默跳过。"""
@@ -157,19 +162,40 @@ subprocess.call([sys.executable, "-c", "import sys; sys.exit(3)"])
 print("转换完成：1 个文件 → slides.txt")
 ''', encoding="utf-8")
 
+    # 6：打开就清空，写入那行被跳过，文件成了空壳
+    (base / "6_emptied.py").write_text("""# open(..., "w") 在打开那一刻就清空文件。
+# 写入被跳过、异常又被吞掉时，你得到的不是旧文件，而是一个空的"新"文件。
+import json
+
+rows = []
+try:
+    rows = json.load(open("rows.csv", encoding="utf-8"))
+except Exception:
+    pass  # 读失败就算了 —— 这里把异常吞掉了
+
+with open("report.html", "w", encoding="utf-8") as f:
+    if rows:
+        f.write("<html><body>")
+        for r in rows:
+            f.write(f"<p>{r}</p>")
+        f.write("</body></html>")
+
+print("报告已生成：report.html")
+""", encoding="utf-8")
+
     report_mod.setup(False)
-    print(f"\n  在 {base} 生成了五个样本，它们的共同点是："
+    print(f"\n  在 {base} 生成了六个样本，它们的共同点是："
           f"退出码 0、打印成功、但结果不是你想要的。\n")
 
     rc = 0
     for name in ("1_field_case.py", "2_noop_write.py", "3_wrong_newline.py",
-                 "4_wrong_target.py", "5_failed_subproc.py"):
+                 "4_wrong_target.py", "5_failed_subproc.py", "6_emptied.py"):
         script = base / name
         res = runner.run(script, watch=[str(base)], quiet=True)
         print(report_mod.C.w(f"━━ {name} ", report_mod.C.BOLD) +
               report_mod.C.w("━" * 50, report_mod.C.GREY))
         print(report_mod.render(res, base=str(base)))
-    print(f"  五个样本都在 {base}，可以直接打开看。"
+    print(f"  六个样本都在 {base}，可以直接打开看。"
           f"删掉它：rm -rf {DEMO_DIR_NAME}\n")
     return rc
 

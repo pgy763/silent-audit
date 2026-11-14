@@ -186,6 +186,94 @@ def test_trace():
 
 
 # ---------------------------------------------------------------- 写错地方
+def _snap(d):
+    """把 {path: (size, digest)} 变成 Snapshot。mtime 一律给 0。"""
+    return snapshot.Snapshot({k: (v[0], 0, v[1]) for k, v in d.items()})
+
+
+def test_shrink():
+    NL = chr(10)
+    print("\n[写空壳与体积骤减]")
+
+    before = _snap({"a.html": (40000, "old"), "b.txt": (200000, "big"),
+                    "c.txt": (10, "tiny")})
+    after = _snap({"a.html": (0, "empty"), "b.txt": (100, "cut"),
+                   "c.txt": (0, "gone")})
+    d = snapshot.compare(before, after)
+    check("写空壳被单独列出来", d.emptied == ["a.html"], f"-> {d.emptied}")
+    check("体积骤减被单独列出来", d.shrunk == ["b.txt"], f"-> {d.shrunk}")
+    check("小文件变小不算空壳", "c.txt" not in d.emptied, f"-> {d.emptied}")
+    check("空壳同时也在 changed 里", "a.html" in d.changed)
+
+    # 正常转换：只新建、不改旧文件，不该有任何告警
+    before = _snap({"in.csv": (20000, "csv")})
+    after = _snap({"in.csv": (20000, "csv"), "out.json": (50000, "json")})
+    d = snapshot.compare(before, after)
+    check("新建产物不产生空壳告警",
+          not d.emptied and not d.shrunk and d.created == ["out.json"])
+
+    # 就地压缩：体积掉到 1/2000，只提醒，不能判 fail
+    # 真实 Diff 里的路径都是绝对路径，roots 也是；这里必须一致，
+    # 否则会额外命中"写到目录之外"那条，把分数多扣 1.5。
+    root = str(ROOT)
+    big = os.path.join(root, "big.txt")
+    before = _snap({big: (200000, "big")})
+    after = _snap({big: (100, "cut")})
+    d2 = snapshot.compare(before, after)
+    v = judge.judge(0, "压缩完成", "", trace.TraceSummary(), d2,
+                   [root], "", True)
+    check("体积骤减只判 warn", any(f.level == "warn" for f in v.findings),
+          f"-> {[f.level for f in v.findings]}")
+    check("体积骤减扣得比空壳轻", v.score >= 7.0, f"-> {v.score}")
+
+    # 路径大小写不一致，不该被当成"写到目录之外"
+    mixed = str(ROOT).upper() + os.sep + "MixCase.txt"
+    before = _snap({mixed: (50000, "a")})
+    after = _snap({mixed: (40000, "b")})
+    dm = snapshot.compare(before, after)
+    v = judge.judge(0, "更新完成", "", trace.TraceSummary(), dm,
+                    [str(ROOT)], "", True)
+    check("盘符大小写不同不算写到目录之外",
+          not any("目录之外" in f.title for f in v.findings),
+          f"-> {[f.title for f in v.findings]}")
+
+    # 空壳要重罚
+    page = os.path.join(root, "r.html")
+    before = _snap({page: (40000, "old")})
+    after = _snap({page: (0, "empty")})
+    d3 = snapshot.compare(before, after)
+    v = judge.judge(0, "报告已生成", "", trace.TraceSummary(), d3,
+                   [root], "", True)
+    check("空壳判 fail", any(f.level == "fail" for f in v.findings),
+          f"-> {[f.level for f in v.findings]}")
+    check("空壳扣分明显", v.score <= 4.0, f"-> {v.score}")
+
+    # 端到端：真的跑一个把文件清空的脚本
+    with Temp() as t:
+        t.write("report.html", "<html>" + "x" * 40000 + "</html>")
+        src = t.write("gen.py", NL.join([
+            'with open("report.html", "w", encoding="utf-8") as f:',
+            '    f.write("")',
+            'print("报告已生成")', '']) )
+        r = runner.run(src, watch=[str(t.path)], cwd=str(t.path), quiet=True)
+        check("端到端：抓到写空壳",
+              any("空壳" in f.title for f in r.verdict.findings),
+              f"-> {[f.title for f in r.verdict.findings]}")
+        check("端到端：分数被压下来", r.verdict.score <= 4.0,
+              f"-> {r.verdict.score}")
+
+    # 端到端：正常的压缩脚本不该被冤枉
+    with Temp() as t:
+        t.write("big.txt", "a" * 200000)
+        src = t.write("min.py", NL.join([
+            'src = open("big.txt", encoding="utf-8").read()',
+            'open("big.min.txt", "w", encoding="utf-8").write(src[:200])',
+            'print("压缩完成")', '']) )
+        r = runner.run(src, watch=[str(t.path)], cwd=str(t.path), quiet=True)
+        check("端到端：正常压缩不扣分", r.verdict.score >= 9.0,
+              f"-> {r.verdict.score} {[f.title for f in r.verdict.findings]}")
+
+
 def test_expect():
     print("\n[写错地方]")
     with Temp() as t:
@@ -511,6 +599,7 @@ def main() -> int:
     test_snapshot()
     test_trace()
     test_expect()
+    test_shrink()
     test_procs()
     test_replay()
     test_e2e()

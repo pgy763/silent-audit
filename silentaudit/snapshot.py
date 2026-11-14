@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 _SKIP_DIRS = {
     ".git", ".hg", ".svn", "__pycache__", "node_modules", ".venv", "venv",
@@ -99,14 +99,28 @@ class Diff:
     deleted: list[str]
     unchanged: int
     files_seen: int = 0      # 快照里看到的文件数；0 表示没做过快照
+    emptied: list[str] = field(default_factory=list)
+    shrunk: list[str] = field(default_factory=list)
+    # emptied：本来有内容，写完之后几乎为空（"打开就清空了"）。
+    # shrunk：体积掉到原来的 1/100 以下，但还没到空 —— 可能是真的内容丢失，
+    # 也可能只是压缩/压缩格式转换，所以只提醒不重罚。
 
     @property
     def real_change(self) -> int:
         return len(self.changed) + len(self.created) + len(self.deleted)
 
 
+# 剩这么点字节就算"被清空"：一个孤零零的换行、或者空字符串。
+_EMPTY_MAX = 16
+# 只有原本够大的文件才谈得上"内容丢失"，否则 "1\n" → "0\n" 也会被算进来。
+_EMPTY_FLOOR = 1024
+_SHRINK_FLOOR = 64 * 1024
+_SHRINK_RATIO = 0.01
+
+
 def compare(before: Snapshot, after: Snapshot) -> Diff:
     changed, touched, created, deleted = [], [], [], []
+    emptied, shrunk = [], []
     for path, (size, mtime, digest) in after.files.items():
         if path not in before.files:
             created.append(path)
@@ -114,6 +128,11 @@ def compare(before: Snapshot, after: Snapshot) -> Diff:
         b_size, b_mtime, b_digest = before.files[path]
         if size != b_size or (digest and b_digest and digest != b_digest):
             changed.append(path)
+            # 40KB 的报告变成 0 字节，也算"变了"，但这是最该被看见的那种变。
+            if b_size >= _EMPTY_FLOOR and size <= _EMPTY_MAX:
+                emptied.append(path)
+            elif b_size >= _SHRINK_FLOOR and size < b_size * _SHRINK_RATIO:
+                shrunk.append(path)
         elif not digest or not b_digest:
             # 大文件没算 md5，只能靠 mtime 判断
             if mtime != b_mtime:
@@ -127,4 +146,5 @@ def compare(before: Snapshot, after: Snapshot) -> Diff:
             deleted.append(path)
     unchanged = len(after.files) - len(changed) - len(touched) - len(created)
     return Diff(sorted(changed), sorted(touched), sorted(created),
-                sorted(deleted), max(0, unchanged), len(after.files))
+                sorted(deleted), max(0, unchanged), len(after.files),
+                sorted(emptied), sorted(shrunk))

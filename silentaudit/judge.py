@@ -269,6 +269,27 @@ def judge(exit_code: int, stdout: str, stderr: str, trace: TraceSummary,
                 penalty=0.0,
             ))
 
+    # 3c) 写出来了，但把原文件写没了 —— 最典型的"打开就清空"
+    if diff.emptied:
+        findings.append(Finding(
+            "fail",
+            f"{len(diff.emptied)} 个文件被写成了空壳（原来有内容，现在几乎为空）",
+            "最常见的原因是 open(..., \"w\") 之后写入那一行被跳过了：文件在 open "
+            "的那一刻就被清空，异常被吞掉，脚本照样打印「已生成」。这类损坏比"
+            "「没写」更危险 —— 下游读到的是一个存在但为空的文件。",
+            [_short(p, base) for p in diff.emptied[:6]],
+            penalty=6.0,
+        ))
+    elif diff.shrunk:
+        findings.append(Finding(
+            "warn",
+            f"{len(diff.shrunk)} 个文件体积掉到原来的 1/100 以下",
+            "内容确实变了，但少得反常。压缩、格式转换这类脚本本来就会变小，"
+            "所以这里只提醒；如果脚本号称\"就地更新\"，那它是把内容写丢了。",
+            [_short(p, base) for p in diff.shrunk[:6]],
+            penalty=2.0,
+        ))
+
     # 4) 读了却一行没写
     if (exit_code == 0 and snapshot_taken and trace.read_count >= 50
             and written == 0 and not diff.touched):
@@ -288,8 +309,12 @@ def judge(exit_code: int, stdout: str, stderr: str, trace: TraceSummary,
         # 快照里的路径统一 normcase 过，roots 也必须同样处理，否则 Windows 上
         # 大小写不一致会把"就在目录里"误判成"跑到外面去了"。
         nr = [os.path.normcase(r) for r in roots]
+        # 两边都要归一化。roots 是用户传的、diff 里的路径来自快照，
+        # 谁没归一化都不该导致"在目录里"被判成"跑到外面"。
         outside = [p for p in (diff.changed + diff.created)
-                   if not any(p == r or p.startswith(r + os.sep) for r in nr)]
+                   if not any(os.path.normcase(p) == r
+                              or os.path.normcase(p).startswith(r + os.sep)
+                              for r in nr)]
         basis = "确认写入"
     else:
         outside = list(trace.outside)
