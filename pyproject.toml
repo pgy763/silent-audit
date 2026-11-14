@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "silent-audit"
+version = "0.1.0"
+description = "判断一个脚本的「我干完了」到底可不可信"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "pgy763" }]
+keywords = ["debugging", "agents", "audit", "silent-failure", "cli"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Environment :: Console",
+    "Topic :: Software Development :: Debuggers",
+]
+
+[project.urls]
+Homepage = "https://github.com/pgy763/silent-audit"
+
+[project.scripts]
+silent-audit = "silentaudit.cli:main"
+
+[tool.setuptools]
+packages = ["silentaudit"]
