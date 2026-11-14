@@ -13,7 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from silentaudit import expect, judge, runner, snapshot, trace  # noqa: E402
+from silentaudit import expect, judge, replay, runner, snapshot, trace  # noqa: E402
 from silentaudit.hints import collect_keys, hints  # noqa: E402
 
 PASS = FAIL = 0
@@ -254,6 +254,93 @@ print("报告生成：report.html")
               f"{[f.title for f in res.verdict.findings]}")
 
 
+# ---------------------------------------------------------------- 两次运行
+def test_replay():
+    print("\n[两次运行对比]")
+
+    # 纯函数部分：拿两次假的运行结果直接比对
+    def fake(exit_code=0, claim=None, changed=0, out="ok", procs=()):
+        v = judge.Verdict(score=10.0, findings=[], claimed_total=claim,
+                          written_files=changed, real_change=changed,
+                          exit_code=exit_code)
+        d = snapshot.Diff(changed=["a"] * changed, touched=[], created=[],
+                          deleted=[], unchanged=[])
+        r = runner.RunResult(exit_code=exit_code, stdout=out, stderr="",
+                             duration=0.1, trace=None, diff=d, verdict=v,
+                             snapshot_note="")
+        r.procs = list(procs)
+        return r
+
+    f, pen = replay.compare(fake(), fake())
+    check("两次完全一样：不扣分", pen == 0.0 and not f[0].penalty,
+          f"-> {pen}")
+    check("两次完全一样：有一条 info 说明一致性",
+          f[0].level == "info" and "一致" in f[0].title, f"-> {f[0].title}")
+
+    f, pen = replay.compare(fake(exit_code=0), fake(exit_code=3))
+    check("第一次成功第二次失败：重罚", pen >= 5.0, f"-> {pen}")
+    check("第一次成功第二次失败：判 fail", f[0].level == "fail", f"-> {f[0].level}")
+
+    f, pen = replay.compare(fake(claim=5), fake(claim=2))
+    check("两次数字不同：点名两个数字", "5" in f[0].title and "2" in f[0].title,
+          f"-> {f[0].title}")
+    check("两次数字不同：扣分", pen >= 4.0, f"-> {pen}")
+
+    f, pen = replay.compare(fake(claim=3, changed=4), fake(claim=3, changed=0))
+    check("第一次改第二次没改：提醒可能是幂等",
+          "幂等" in f[0].detail, f"-> {f[0].detail[:40]}")
+
+    f, pen = replay.compare(fake(out="批次号 1958"), fake(out="批次号 3674"))
+    check("只有输出文字不同：轻罚", 0 < pen <= 2.0, f"-> {pen}")
+    check("只有输出文字不同：标 warn", f[0].level == "warn", f"-> {f[0].level}")
+
+    # 路径和耗时不该被当成差异
+    a = fake(out="写入 D:\\tmp\\x\\a.csv 耗时 0.42s")
+    b = fake(out="写入 D:\\tmp\\x\\a.csv 耗时 0.37s")
+    f, pen = replay.compare(a, b, work="D:\\tmp\\x")
+    check("路径和耗时不产生噪音", pen == 0.0, f"-> {pen} {f[0].title}")
+
+    # 端到端：副本隔离（原文件必须一个字节都不变）
+    with Temp() as t:
+        src = t.write("script.py",
+                      'with open("data.csv", "w", encoding="utf-8") as f:\n'
+                      '    f.write("1,2\\n")\n'
+                      'print("处理完成：共 1 行")\n')
+        t.write("seed.txt", "already here")
+        before = (t.path / "seed.txt").stat().st_mtime_ns
+        rp = replay.run_replay(src, watch=[str(t.path)], cwd=str(t.path),
+                               keep=True)
+        check("端到端：跑了两次", rp.a is not None and rp.b is not None)
+        check("端到端：原目录的种子文件没被动过",
+              (t.path / "seed.txt").stat().st_mtime_ns == before)
+        check("端到端：原目录没多出 data.csv",
+              not (t.path / "data.csv").exists())
+        check("端到端：两次结果一致", not rp.diverged, f"-> {rp.findings}")
+        check("端到端：--keep 留下了副本目录",
+              (Path(rp.directory) / "work").is_dir())
+
+        # 副本里同一个脚本连跑两遍必须都真的改了文件（说明重置是有效的）
+        check("端到端：两次各自的落盘改动都非零",
+              rp.a.diff.real_change > 0 and rp.b.diff.real_change > 0,
+              f"-> {rp.a.diff.real_change}/{rp.b.diff.real_change}")
+
+    # 端到端：不 keep 时应当清理干净
+    with Temp() as t:
+        src = t.write("s.py", 'print("nothing")\n')
+        rp = replay.run_replay(src, watch=[str(t.path)], cwd=str(t.path))
+        check("端到端：不 keep 时副本目录被删掉",
+              not (t.path / replay.REPLAY_DIR).exists())
+
+    # 渲染不炸
+    with Temp() as t:
+        src = t.write("s.py", 'print("处理完成：共 0 行")\n')
+        rp = replay.run_replay(src, watch=[str(t.path)], cwd=str(t.path))
+        from silentaudit import report as report_mod
+        txt = report_mod.render_replay(rp, base=str(t.path))
+        check("渲染：有标题", "可复现" in txt or "不可复现" in txt)
+        check("渲染：列出两次", "第 1 次" in txt and "第 2 次" in txt)
+
+
 # ---------------------------------------------------------------- 端到端
 def test_e2e():
     print("\n[端到端：应该被抓到的]")
@@ -425,6 +512,7 @@ def main() -> int:
     test_trace()
     test_expect()
     test_procs()
+    test_replay()
     test_e2e()
     total = PASS + FAIL
     print(f"\n{total} 项：{PASS} passed, {FAIL} failed")

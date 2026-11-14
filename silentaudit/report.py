@@ -79,6 +79,62 @@ _ICON = {"fail": "✗", "warn": "!", "info": "·"}
 _COLOR = {"fail": C.RED, "warn": C.YELLOW, "info": C.CYAN}
 
 
+def _replay_rows(res) -> str:
+    """一次运行的摘要，用于两行对照。"""
+    v = res.verdict
+    claim = "?" if v.claimed_total is None else f"{v.claimed_total:,}"
+    return (f"声称 {claim} · 变了 {res.diff.real_change} 个 · "
+            f"退出码 {res.exit_code} · {v.score:.1f}/10")
+
+
+def render_replay(rp, *, verbose: bool = False, base: str | None = None) -> str:
+    base = base or os.getcwd()
+    score = rp.score
+    col = C.GREEN if score >= 9 else (C.CYAN if score >= 6 else
+                                      (C.YELLOW if score >= 3 else C.RED))
+    if rp.diverged:
+        head = "不可复现：同样的起点，两次结果不一样"
+    else:
+        head = "可复现：同样的起点，两次结果一致"
+
+    lines: list[str] = ["", f"  {C.w(head, col + C.BOLD)}", ""]
+    lines.append(f"  可信度  {score_bar(score)}  {C.w(f'{score:.1f}/10', col + C.BOLD)}")
+    lines.append(f"  {C.w('两次里更差的一次，再扣掉不一致的分', C.GREY)}")
+    lines.append("")
+    lines.append(f"  {C.w('副本'.ljust(6), C.GREY)}  {rp.note}（不碰你的原文件）")
+    lines.append("")
+    lines.append(f"  {C.w('第 1 次', C.GREY)}  {_replay_rows(rp.a)}")
+    lines.append(f"  {C.w('第 2 次', C.GREY)}  {_replay_rows(rp.b)}")
+    lines.append("")
+
+    for f in rp.findings:
+        icon = _ICON.get(f.level, "·")
+        c = _COLOR.get(f.level, C.CYAN)
+        lines.append(f"  {C.w(icon, c + C.BOLD)} {C.w(f.title, C.BOLD)}")
+        for seg in _wrap(f.detail, 78):
+            lines.append(f"    {C.w(seg, C.DIM)}")
+        for e in f.evidence:
+            lines.append(f"      {C.w('·', C.GREY)} {C.w(e, C.GREY)}")
+        lines.append("")
+
+    # 每次运行自己的主要问题各列一条，避免把两份完整报告糊在一起
+    for tag, res in (("第 1 次", rp.a), ("第 2 次", rp.b)):
+        top = [f for f in res.verdict.findings if f.penalty > 0]
+        if not top:
+            continue
+        lines.append(f"  {C.w(tag + '自己的问题', C.YELLOW + C.BOLD)}")
+        for f in top[:2]:
+            lines.append(f"    {C.w('·', C.GREY)} {f.title}")
+        lines.append("")
+
+    if verbose:
+        _file_section(lines, rp.b, base)
+
+    lines.append(f"  {C.w(f'副本目录 {rp.directory}', C.GREY)}")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def render(res, *, verbose: bool = False, base: str | None = None) -> str:
     base = base or os.getcwd()
     v = res.verdict

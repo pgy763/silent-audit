@@ -54,7 +54,24 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--fail-under", type=float, metavar="N",
                    help="可信度低于 N 就以非 0 退出（给 CI 用）")
 
-    s = sub.add_parser("demo", help="跑内置的四个失败样本，看看它到底抓什么")
+    rp = sub.add_parser(
+        "replay",
+        help="同一个起点连跑两遍，看两次结果是否一致")
+    rp.add_argument("script", help="要审计的 .py 文件")
+    rp.add_argument("--watch", "-w", action="append", metavar="DIR",
+                    help="盯住哪些目录（可重复）。默认盯脚本所在目录")
+    rp.add_argument("--cwd", help="副本放在哪个目录下（默认当前目录）")
+    rp.add_argument("--allow-new", action="append", metavar="GLOB",
+                    help="允许新建的文件（可重复，支持 * 通配）")
+    rp.add_argument("--json", metavar="PATH", help="把结构化结果写到文件")
+    rp.add_argument("--no-color", action="store_true")
+    rp.add_argument("--verbose", "-v", action="store_true", help="列出文件明细")
+    rp.add_argument("--keep", action="store_true",
+                    help="跑完保留副本目录，方便自己进去看")
+    rp.add_argument("--fail-under", type=float, metavar="N",
+                    help="可信度低于 N 就以非 0 退出（给 CI 用）")
+
+    s = sub.add_parser("demo", help="跑内置的五个失败样本，看看它到底抓什么")
     s.add_argument("--no-color", action="store_true")
     return p
 
@@ -174,6 +191,43 @@ def main(argv: list[str] | None = None) -> int:
 
     before, forwarded = _split_forward(argv)
     ns = build_parser().parse_args(before)
+
+    if ns.cmd == "replay":
+        report_mod.setup(ns.no_color)
+        from .replay import run_replay
+
+        rp = run_replay(Path(ns.script), args=forwarded, watch=ns.watch,
+                        cwd=ns.cwd, allow_new=ns.allow_new, keep=ns.keep)
+        print(report_mod.render_replay(rp, verbose=ns.verbose,
+                                       base=os.path.abspath(ns.cwd or ".")))
+        if ns.json:
+            payload = {
+                "script": str(Path(ns.script).resolve()),
+                "score": round(rp.score, 2),
+                "diverged": rp.diverged,
+                "copy": rp.note,
+                "runs": [{
+                    "exit_code": r.exit_code,
+                    "claimed_total": r.verdict.claimed_total,
+                    "real_change": r.diff.real_change,
+                    "score": round(r.verdict.score, 2),
+                    "changed": r.diff.changed[:100],
+                    "created": r.diff.created[:100],
+                    "deleted": r.diff.deleted[:100],
+                } for r in (rp.a, rp.b)],
+                "findings": [
+                    {"level": f.level, "title": f.title, "detail": f.detail,
+                     "evidence": f.evidence}
+                    for f in rp.findings
+                ],
+            }
+            Path(ns.json).parent.mkdir(parents=True, exist_ok=True)
+            Path(ns.json).write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            print(f"  {report_mod.C.w('结果已写入', report_mod.C.GREY)} {ns.json}")
+        if ns.fail_under is not None and rp.score < ns.fail_under:
+            return 2
+        return 0
 
     if ns.cmd == "demo":
         report_mod.setup(ns.no_color)
