@@ -8,6 +8,10 @@
 这种失败不报错、不抛异常、不留日志。你只有事后去 `git diff` 才会发现。
 `silent-audit` 把这件事变成一条命令。
 
+![跑脚本 → 它说完成了 → 数一下，0 行 → silent-audit 判决](docs/demo.gif)
+
+同样的输出，文字版：
+
 ```
 $ silent-audit run migrate.py
 
