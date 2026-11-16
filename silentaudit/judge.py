@@ -21,15 +21,31 @@ from .trace import TraceSummary
 
 # ---- 从 stdout 里读出"它声称干了什么" -------------------------------------
 
+# 动词表。宽一点好：读不出数字，「说 N 项却产出 0」这条判据就完全没有输入。
+# 但也不是越宽越好 —— 只收"确实在描述一件事情的数量"的动词，
+# 「读取 / 打印 / 输出」这类太容易撞上普通日志，刻意不收。
+_CN_VERBS = (
+    "处理", "修改", "更新", "迁移", "转换", "替换", "删除", "清理", "复制", "移动",
+    "写入", "生成", "导出", "导入", "同步", "下载", "上传", "解析", "校验", "扫描",
+    "抓取", "备份", "恢复", "渲染", "构建", "保存", "合并", "压缩", "解压", "统计",
+    "汇总", "分类", "重命名", "格式化", "采集", "裁剪", "比对", "核对", "修复",
+)
+_EN_VERBS = (
+    "processed", "modified", "updated", "migrated", "converted", "replaced",
+    "removed", "cleaned", "copied", "moved", "wrote", "generated", "changed",
+    "fixed", "exported", "imported", "synced", "downloaded", "uploaded",
+    "parsed", "validated", "scanned", "fetched", "backed", "rendered", "built",
+    "saved", "merged", "compressed", "created", "deleted", "archived",
+)
+_VERB = "|".join(_CN_VERBS + _EN_VERBS)
+_UNIT = r"(?:个|行|条|处|项|张|份|files?|rows?|lines?|items?|records?)"
+
 _COUNT_PATTERNS = (
-    re.compile(r"(?:处理|修改|更新|迁移|转换|替换|删除|清理|复制|移动|写入|生成|"
-               r"processed|updated|migrated|converted|replaced|removed|cleaned|"
-               r"copied|moved|wrote|generated|changed|fixed)"
-               r"[^\d\n]{0,12}?(\d[\d,]*)\s*(?:个|行|条|处|项|files?|rows?|lines?|items?)?",
+    # 动词在前：「导出完成：1234 行」
+    re.compile(r"(?:" + _VERB + r")[^\d\n]{0,12}?(\d[\d,]*)\s*" + _UNIT + r"?",
                re.I),
-    re.compile(r"(\d[\d,]*)\s*(?:个|行|条|处|项)\s*"
-               r"(?:文件|行|记录|条目|项)?[^\n]{0,8}"
-               r"(?:已|被)?(?:处理|修改|更新|迁移|转换|替换|删除|清理|复制|移动|写入|生成)",
+    # 数字在前：「共 1,234 个文件已更新」
+    re.compile(r"(\d[\d,]*)\s*" + _UNIT + r"[^\n]{0,10}(?:已|被)?(?:" + _VERB + r")",
                re.I),
 )
 
@@ -57,18 +73,45 @@ class Claim:
     value: int | None = None
 
 
+# 「not ok」不是成功；先把它抹掉再找成功词。
+_NEGATED = re.compile(r"\bnot\s+(?:ok|done|fine|good)\b")
+# 「0 个失败」「0 errors」是"没有出问题"，反过来不能当成失败词。
+# 注意不能用 \b0：中文是 \w，「报错0处」里 0 前面没有词边界。
+_ZERO_PHRASE = re.compile(
+    r"(?:(?<![0-9])0\s*"
+    r"(?:个|行|条|处|项|次|errors?|failures?|warnings?|exceptions?|problems?)"
+    r"|\bno\s+(?:errors?|failures?|warnings?|exceptions?|problems?)\b)")
+
+
 def _has_words(text: str, words: tuple[str, ...]) -> bool:
-    low = (text or "").lower()
-    return any(w in low for w in words)
+    """词表匹配。短的 ASCII 词必须整词命中。
+
+    早先用 ``w in low`` 无差别子串匹配，于是 ``token 已失效`` / ``cook the
+    books`` / ``broken link`` 里的 ``ok`` 都被判成"成功"——一个词的误报足以让
+    整条结论反过来。
+    """
+    low = _NEGATED.sub(" ", (text or "").lower())
+    for w in words:
+        if w.isascii() and w.isalnum() and len(w) <= 3:
+            if re.search(r"(?<![a-z0-9])" + re.escape(w) + r"(?![a-z0-9])", low):
+                return True
+        elif w in low:
+            return True
+    return False
 
 
 def read_claims(stdout: str, stderr: str) -> list[Claim]:
+    """从输出里读出「它声称干了什么」。
+
+    一条要点：数量与成/败判定**互不覆盖**。早先匹配到数字就 ``continue``，
+    结果 ``处理完成：100 行，3 errors`` 只留下 count —— 判据 6（部分失败被吞）
+    因此永远拿不到 ``says_bad``。现在同一行可以同时产出 count + success + failure。
+    """
     claims: list[Claim] = []
     for raw in (stdout or "").splitlines():
         line = raw.strip()
         if not line or len(line) > 400:
             continue
-        low = line.lower()
         hit = None
         for pat in _COUNT_PATTERNS:
             m = pat.search(line)
@@ -77,18 +120,12 @@ def read_claims(stdout: str, stderr: str) -> list[Claim]:
                 break
         if hit is not None:
             claims.append(Claim(line, "count", hit))
-            # 同一行里也可能带着"完成"——不能因为先匹配了数字就漏掉
-            if any(w in low for w in _SUCCESS_WORDS):
-                claims.append(Claim(line, "success"))
-            continue
-        if any(w in low for w in _SUCCESS_WORDS):
+        if _has_words(line, _SUCCESS_WORDS):
             claims.append(Claim(line, "success"))
-            continue
-        if any(w in low for w in _FAILURE_WORDS):
+        if _has_words(_ZERO_PHRASE.sub(" ", line), _FAILURE_WORDS):
             claims.append(Claim(line, "failure"))
     for raw in (stderr or "").splitlines():
-        low = raw.strip().lower()
-        if any(w in low for w in _FAILURE_WORDS):
+        if _has_words(_ZERO_PHRASE.sub(" ", raw), _FAILURE_WORDS):
             claims.append(Claim(raw.strip(), "failure"))
     return claims[:80]
 
@@ -262,7 +299,8 @@ def judge(exit_code: int, stdout: str, stderr: str, trace: TraceSummary,
           diff: Diff, roots: list[str], base: str,
           snapshot_taken: bool = True,
           allow_new: list[str] | None = None,
-          procs: list | None = None) -> Verdict:
+          procs: list | None = None,
+          readonly: bool = False) -> Verdict:
     findings: list[Finding] = []
     score = 10.0
 
@@ -275,9 +313,21 @@ def judge(exit_code: int, stdout: str, stderr: str, trace: TraceSummary,
     says_done = any(c.kind == "success" for c in claims)
     says_bad = any(c.kind == "failure" for c in claims)
 
+    # 0) 只读模式：用户自己声明了"这次不写盘"，那"没写入"就不该算缺陷。
+    #    这比去猜哪些脚本是只读的可靠 —— 猜错的代价是用户关掉整个工具。
+    if readonly:
+        findings.append(Finding(
+            "info",
+            "只读模式：没有写文件是预期行为",
+            "你用 --readonly 声明了这次只读，所以「磁盘没变」不再扣分。"
+            "其余判据照常生效：读了多少、跳过了哪些输入、子进程有没有悄悄失败。",
+            [],
+            penalty=0.0,
+        ))
+
     # 1) 核心判据：声称成功，但世界没变
     #    没拍快照时不能说"磁盘没变"—— 那只是没看，不是没变。
-    if exit_code == 0 and says_done and real == 0 and snapshot_taken:
+    if exit_code == 0 and says_done and real == 0 and snapshot_taken and not readonly:
         findings.append(Finding(
             "fail",
             "退出码 0，报告成功，但磁盘上没有任何文件发生变化",
@@ -299,7 +349,7 @@ def judge(exit_code: int, stdout: str, stderr: str, trace: TraceSummary,
         ))
 
     # 2) 说了数量，但实际处理数对不上
-    if claimed_total and claimed_total > 0:
+    if claimed_total and claimed_total > 0 and not readonly:
         produced = real if real else written
         if produced == 0:
             findings.append(Finding(
@@ -395,7 +445,8 @@ def judge(exit_code: int, stdout: str, stderr: str, trace: TraceSummary,
             ))
 
     # 4) 读了却一行没写
-    if (exit_code == 0 and snapshot_taken and trace.read_count >= 50
+    if (exit_code == 0 and snapshot_taken and not readonly
+            and trace.read_count >= 50
             and written == 0 and not diff.touched):
         findings.append(Finding(
             "fail",

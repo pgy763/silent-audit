@@ -51,6 +51,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--allow-new", action="append", metavar="GLOB",
                    help="允许新建的文件（可重复，支持 * 通配）。"
                         "用来避免把正常生成的报告误判成\"写错地方\"")
+    r.add_argument("--readonly", action="store_true",
+                   help="声明这个脚本只读不写：不再因为\"磁盘没变\"扣分")
     r.add_argument("--fail-under", type=float, metavar="N",
                    help="可信度低于 N 就以非 0 退出（给 CI 用）")
 
@@ -294,7 +296,8 @@ def main(argv: list[str] | None = None) -> int:
     report_mod.setup(ns.no_color)
     res = runner.run(Path(ns.script), args=forwarded, watch=ns.watch,
                      cwd=ns.cwd, take_snapshot=not ns.no_snapshot,
-                     quiet=ns.quiet, allow_new=ns.allow_new)
+                     quiet=ns.quiet, allow_new=ns.allow_new,
+                     readonly=ns.readonly)
     print(report_mod.render(res, verbose=ns.verbose,
                             base=os.path.abspath(ns.cwd or
                                                  str(Path(ns.script).resolve().parent))))

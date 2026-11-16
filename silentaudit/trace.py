@@ -36,6 +36,18 @@ def _norm(path) -> str:
 
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# 调用栈里排在用户代码前面的，除了本包自己，还有标准库和 site-packages。
+# 只跳过本包的话，pathlib.Path.write_text 会报出 _local.py:537 这种行号 ——
+# 位置是有了，但指向的是标准库内部，对排查毫无用处。
+_SKIP_PREFIXES = tuple(
+    os.path.normcase(os.path.abspath(d)) for d in {
+        _PKG_DIR,
+        os.path.dirname(os.__file__),
+        os.path.join(os.path.dirname(os.__file__), "site-packages"),
+        os.path.join(os.path.dirname(os.__file__), "dist-packages"),
+    } if d
+)
+
 
 def _site() -> str:
     """返回触发这次系统调用的用户代码位置，形如 ``migrate.py:42``。
@@ -62,7 +74,7 @@ def _site() -> str:
             full = os.path.abspath(name)
         except Exception:
             full = name
-        if not full.startswith(_PKG_DIR):
+        if not os.path.normcase(full).startswith(_SKIP_PREFIXES):
             return f"{os.path.basename(full)}:{frame.f_lineno}"
         frame = frame.f_back
         seen += 1

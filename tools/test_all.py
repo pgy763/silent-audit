@@ -692,6 +692,121 @@ print("转换完成")
               f"-> {res.verdict.score} / {[f.title for f in res.verdict.findings]}")
 
 
+# ---------------------------------------------------------------- 缺陷回归
+def test_vocab():
+    print("\n[动词表：不能只认「处理」]")
+    for line, want in [
+        ("导出完成：1234 行", 1234),
+        ("同步完成：42 条", 42),
+        ("下载完成：7 个文件", 7),
+        ("解析完成：100 条", 100),
+        ("校验完成：50 项", 50),
+        ("上传了 3 个文件", 3),
+        ("Parsed 5 records", 5),
+        ("Exported 12 files", 12),
+        ("Synced 3 items", 3),
+        ("处理完成 3 项", 3),
+    ]:
+        got = [c for c in judge.read_claims(line, "") if c.kind == "count"]
+        check(f"读得出 {line[:16]!r}", bool(got) and got[0].value == want,
+              f"-> {[(c.kind, c.value) for c in judge.read_claims(line, '')]}")
+
+    # 但也不能宽到把普通日志当数量
+    for line in ("正在读取文件", "打印输出 100 次", "打开 config.json"):
+        check(f"不误读 {line!r}",
+              not [c for c in judge.read_claims(line, "") if c.kind == "count"],
+              f"-> {[(c.kind, c.value) for c in judge.read_claims(line, '')]}")
+
+
+def test_okword():
+    print("\n[ok 必须整词匹配]")
+    for line in ("token 已失效", "cook the books", "broken link", "not ok",
+                 "lookup failed", "not ok, retrying"):
+        check(f"{line!r} 不算成功",
+              not [c for c in judge.read_claims(line, "") if c.kind == "success"],
+              f"-> {[(c.kind, c.value) for c in judge.read_claims(line, '')]}")
+    # 真的 ok 还得认出来
+    for line in ("ok", "done — ok", "OK"):
+        check(f"{line!r} 仍算成功",
+              [c for c in judge.read_claims(line, "") if c.kind == "success"],
+              f"-> {[(c.kind, c.value) for c in judge.read_claims(line, '')]}")
+
+
+def test_sameline():
+    print("\n[同一行既有数量又有失败]")
+    kinds = {c.kind for c in judge.read_claims("处理完成：100 行，3 errors", "")}
+    check("数量与失败同时留下", kinds == {"count", "success", "failure"}, f"-> {kinds}")
+    kinds = {c.kind for c in judge.read_claims("已处理 12 项，1 个跳过", "")}
+    check("跳过也算失败词", "failure" in kinds and "count" in kinds, f"-> {kinds}")
+
+    # 反过来：「0 个问题」「0 errors」是"没问题"，不能算失败
+    for line in ("检查完成，共 2 行，0 个问题", "0 errors", "报错 0 处",
+                 "no errors found"):
+        check(f"{line!r} 不算失败",
+              not [c for c in judge.read_claims(line, "") if c.kind == "failure"],
+              f"-> {[(c.kind, c.value) for c in judge.read_claims(line, '')]}")
+
+
+def test_readonly():
+    print("\n[--readonly：只读脚本不该被冤枉]")
+    with Temp() as t:
+        # 读得多、什么都不写，但确实在做事
+        p = t.write("check.py", '''\
+rows = open("rows.csv", encoding="utf-8").read().splitlines()
+bad = [r for r in rows if not r]
+print(f"检查完成，共 {len(rows)} 行，{len(bad)} 个问题")
+''')
+        (t.path / "rows.csv").write_text(
+            "id,name\n" + "".join(f"{i},a{i}\n" for i in range(200)),
+            encoding="utf-8")
+
+        strict = runner.run(p, watch=[str(t.path)], quiet=True)
+        check("默认仍然判它没干活", strict.verdict.score < 5,
+              f"-> {strict.verdict.score} / {[f.title for f in strict.verdict.findings]}")
+
+        loose = runner.run(p, watch=[str(t.path)], quiet=True, readonly=True)
+        check("--readonly 后不扣分", loose.verdict.score >= 9,
+              f"-> {loose.verdict.score} / {[f.title for f in loose.verdict.findings]}")
+        check("--readonly 会说明原因",
+              any("只读模式" in f.title for f in loose.verdict.findings),
+              f"-> {[f.title for f in loose.verdict.findings]}")
+
+        # 只读模式不能把真正的问题一起放过
+        bad = t.write("bad.py", '''\
+import subprocess
+import sys
+subprocess.run([sys.executable, "-c", "import sys; sys.exit(2)"])
+print("校验完成：10 项")
+''')
+        v = runner.run(bad, watch=[str(t.path)], quiet=True, readonly=True)
+        check("--readonly 仍抓子进程失败", v.verdict.score < 7,
+              f"-> {v.verdict.score} / {[f.title for f in v.verdict.findings]}")
+
+
+def test_pathlib_site():
+    print("\n[行号归因：标准库帧要跳过]")
+    with Temp() as t:
+        p = t.write("three.py", '''\
+import json
+import pathlib
+open("a.txt", "w").write("x")
+pathlib.Path("b.txt").write_text("y")
+json.dump({"c": 1}, open("c.json", "w"))
+''')
+        res = runner.run(p, watch=[str(t.path)], quiet=True,
+                         allow_new=["*.txt", "*.json"])
+        sites = {os.path.basename(k): v.most_common(1)[0][0]
+                 for k, v in res.trace.sites.items()}
+        check("open 记到用户行", sites.get("a.txt", "").startswith("three.py:"),
+              f"-> {sites}")
+        check("Path.write_text 记到用户行", sites.get("b.txt", "").startswith("three.py:"),
+              f"-> {sites}（不该是 _local.py / pathlib.py）")
+        check("json.dump 记到用户行", sites.get("c.json", "").startswith("three.py:"),
+              f"-> {sites}")
+        check("行号各不相同",
+              len({v for v in sites.values()}) >= 3, f"-> {sites}")
+
+
 def main() -> int:
     print("silent-audit 自测")
     test_wrap()
@@ -704,6 +819,11 @@ def main() -> int:
     test_sites()
     test_procs()
     test_replay()
+    test_vocab()
+    test_okword()
+    test_sameline()
+    test_readonly()
+    test_pathlib_site()
     test_e2e()
     total = PASS + FAIL
     print(f"\n{total} 项：{PASS} passed, {FAIL} failed")

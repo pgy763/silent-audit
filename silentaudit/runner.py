@@ -44,7 +44,8 @@ def _user_roots(script: Path, watch: list[str] | None) -> list[str]:
 def run(script: Path, args: list[str] | None = None,
         watch: list[str] | None = None, cwd: str | None = None,
         take_snapshot: bool = True, quiet: bool = False,
-        allow_new: list[str] | None = None) -> RunResult:
+        allow_new: list[str] | None = None,
+        readonly: bool = False) -> RunResult:
     script = Path(script).resolve()
     if not script.is_file():
         raise SystemExit(f"找不到脚本：{script}")
@@ -118,7 +119,8 @@ def run(script: Path, args: list[str] | None = None,
                               trace.summary, diff, roots, work_dir,
                               snapshot_taken=take_snapshot,
                               allow_new=allow_new,
-                              procs=procs)
+                              procs=procs,
+                              readonly=readonly)
 
     # 只有在"报告不可信"时才去源码里找线索，避免满屏噪音
     try:
